@@ -2,73 +2,72 @@ import json
 import os
 import re
 
-ALLOWED_DOMAINS = ["iitgn.ac.in"]
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_FILE = os.path.join(BASE_DIR, "messages.json")
+OUTPUT_FILE = os.path.join(BASE_DIR, "pre_classified.json")
 
-SPAM_KEYWORDS = [
-    "unsubscribe", "click here", "buy now", "limited offer",
-    "congratulations you won", "free gift", "act now", "discount",
-    "sale", "offer expires", "winner", "claim your", "100% free",
-    "cash prize", "earn money", "work from home", "lottery"
-]
+SENDER_CATEGORIES = {
+    "bvpuvar@iitgn.ac.in": "lost&found",
+    "acad.exp@iitgn.ac.in": "acadexp",
+    "medical@iitgn.ac.in": "medical",
+    "welfare.secretary@iitgn.ac.in": "Welfcounc",
+    "technical.secretary@iitgn.ac.in": "Techcounc",
+    "cds@iitgn.ac.in": "CDS",
+    "sports.secretary@iitgn.ac.in": "sportscounc",
+    "pdc.secretary@iitgn.ac.in": "PDC",
+}
 
-PROMOTION_KEYWORDS = [
-    "newsletter", "subscription", "promotional", "advertisement",
-    "sponsored", "marketing", "deals", "coupon", "promo"
-]
+SUBJECT_CATEGORIES = {
+    "mess_menu": ["mess menu"]
+}
 
 
-def is_allowed_sender(email_from: str) -> bool:
-    if not email_from:
-        return False
+def extract_email(email_from: str) -> str:
     match = re.search(r'[\w\.-]+@[\w\.-]+', email_from)
-    if not match:
-        return False
-    domain = match.group(0).lower().split("@")[-1]
-    return domain in ALLOWED_DOMAINS
+    return match.group(0).lower() if match else ""
 
 
-def has_subject(subject: str) -> bool:
-    return bool(subject and subject.strip())
+def get_category_from_sender(email_from: str) -> str | None:
+    email_address = extract_email(email_from)
+    return SENDER_CATEGORIES.get(email_address)
 
 
-def is_spam(subject: str, body: str) -> bool:
-    text = (subject + " " + body).lower()
-    return any(keyword in text for keyword in SPAM_KEYWORDS)
-
-
-def is_promotion(subject: str, body: str) -> bool:
-    text = (subject + " " + body).lower()
-    return any(keyword in text for keyword in PROMOTION_KEYWORDS)
-
-
-def filter_email(email: dict) -> bool:
-    email_from = email.get("FROM", "")
-    subject = email.get("SUBJECT", "")
-    body = email.get("BODY", "")
-
-    if not is_allowed_sender(email_from):
-        return False
-    if not has_subject(subject):
-        return False
-    if is_spam(subject, body):
-        return False
-    if is_promotion(subject, body):
-        return False
-    return True
+def get_category_from_subject(subject: str) -> str | None:
+    subject_lower = subject.lower()
+    for category, keywords in SUBJECT_CATEGORIES.items():
+        if any(keyword.lower() in subject_lower for keyword in keywords):
+            return category
+    return None
 
 
 def run_pre_classifier():
-    if not os.path.exists("messages.json"):
+    if not os.path.exists(INPUT_FILE):
         return
 
-    with open("messages.json", "r") as f:
+    with open(INPUT_FILE, "r") as f:
         emails = json.load(f)
 
-    passed = [email for email in emails if filter_email(email)]
+    if not emails:
+        return
 
-    with open("pre_classified.json", "w") as f:
-        json.dump(passed, f, indent=2)
+    all_categories = set(SENDER_CATEGORIES.values()) | set(SUBJECT_CATEGORIES.keys())
+    categorized = {category: [] for category in all_categories}
 
+    dropped = 0
+    for email in emails:
+        category = get_category_from_sender(email.get("FROM", ""))
+
+        if category is None:
+            category = get_category_from_subject(email.get("SUBJECT", ""))
+
+        if category is None:
+            dropped += 1
+            continue
+
+        categorized[category].append(email)
+
+    with open(OUTPUT_FILE, "w") as f:
+        json.dump(categorized, f, indent=2)
 
 if __name__ == "__main__":
     run_pre_classifier()
