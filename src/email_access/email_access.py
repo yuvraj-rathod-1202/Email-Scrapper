@@ -10,21 +10,25 @@ from googleapiclient.errors import HttpError
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
+TOKEN_FILE = os.path.join(BASE_DIR, "token.json")
+
 
 def get_credentials():
     creds = None
 
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
             creds = flow.run_local_server(port=8000)
 
-        with open("token.json", "w") as token:
+        with open(TOKEN_FILE, "w") as token:
             token.write(creds.to_json())
 
     return creds
@@ -36,8 +40,7 @@ def scrape_emails(service):
         .messages()
         .list(
             userId="me",
-            labelIds=["INBOX"],
-            q="is:unread",
+            labelIds=["INBOX", "UNREAD"],
             maxResults=10
         )
         .execute()
@@ -46,8 +49,19 @@ def scrape_emails(service):
     if not messages:
         return
 
+    existing = []
+    saved_ids = set()
+    if os.path.exists("messages.json"):
+        with open("messages.json", "r") as m:
+            existing = json.load(m)
+        saved_ids = {email["id"] for email in existing}
+
     dump = []
     for message in messages:
+
+        if message["id"] in saved_ids:
+            continue
+
         temp = {}
         temp.update({"id": message["id"]})
 
@@ -61,12 +75,16 @@ def scrape_emails(service):
         headers = payload["headers"]
 
         if "parts" in payload:
+            body = ""
             for part in payload["parts"]:
                 if part["mimeType"] == "text/plain":
-                    body = base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8")
-                    break
+                    data = part["body"].get("data")
+                    if data:
+                        body = base64.urlsafe_b64decode(data).decode("utf-8")
+                        break
         else:
-            body = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8")
+            data = payload["body"].get("data")
+            body = base64.urlsafe_b64decode(data).decode("utf-8") if data else ""
 
         message_folder = os.path.join("attachments", message["id"])
         os.makedirs(message_folder, exist_ok=True)
@@ -106,14 +124,10 @@ def scrape_emails(service):
 
         dump.append(temp)
 
-    existing = []
-    if os.path.exists("messages.json"):
-        with open("messages.json", "r") as m:
-            existing = json.load(m)
-
-    existing.extend(dump)
-    with open("messages.json", "w") as m:
-        json.dump(existing, m, indent=2)
+    if dump:
+        existing.extend(dump)
+        with open("messages.json", "w") as m:
+            json.dump(existing, m, indent=2)
 
 
 def main():
