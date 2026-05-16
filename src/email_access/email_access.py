@@ -1,7 +1,7 @@
 import os.path
+import json
 import base64
 import time
-
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -11,145 +11,123 @@ from googleapiclient.errors import HttpError
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 
-def download_attachment(service, message_id, attachment_id, filename):
-    try:
-        att = (
-            service.users()
-            .messages()
-            .attachments()
-            .get(userId="me", messageId=message_id, id=attachment_id)
-            .execute()
-        )
-
-        file_data = base64.urlsafe_b64decode(att["data"])
-
-        if not os.path.exists("downloads"):
-            os.makedirs("downloads")
-
-        path = os.path.join("downloads", filename)
-        with open(path, "wb") as f:
-            f.write(file_data)
-
-        return path
-    except Exception:
-        return None
-
-
-def parse_parts(service, parts, message_id):
-    body_text = ""
-    attachments_list = []
-
-    if not parts:
-        return body_text, attachments_list
-
-    for part in parts:
-        mimeType = part.get("mimeType")
-        filename = part.get("filename")
-        body = part.get("body", {})
-        attachment_id = body.get("attachmentId")
-
-        if mimeType == "text/plain" and "data" in body:
-            data = body["data"]
-            byte_code = base64.urlsafe_b64decode(data)
-            body_text += byte_code.decode("utf-8")
-
-        elif mimeType in ["multipart/alternative", "multipart/mixed"]:
-            if "parts" in part:
-                sub_body, sub_attachments = parse_parts(
-                    service, part["parts"], message_id
-                )
-                body_text += sub_body
-                attachments_list.extend(sub_attachments)
-
-        if filename and attachment_id:
-            saved_path = download_attachment(service, message_id, attachment_id, filename)
-            if saved_path:
-                attachments_list.append(saved_path)
-
-    return body_text, attachments_list
-
-
-def get_gmail_service():
+def get_credentials():
     creds = None
+
     if os.path.exists("token.json"):
         creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json", SCOPES
-            )
-            creds = flow.run_local_server(port=8080)
+            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+            creds = flow.run_local_server(port=8000)
+
         with open("token.json", "w") as token:
             token.write(creds.to_json())
 
-    return build("gmail", "v1", credentials=creds)
+    return creds
 
 
-def fetch_unread_emails(service, max_results: int = 50):
-    try:
-        results = (
+def scrape_emails(service):
+    results = (
+        service.users()
+        .messages()
+        .list(
+            userId="me",
+            labelIds=["INBOX"],
+            q="is:unread",
+            maxResults=10
+        )
+        .execute()
+    )
+    messages = results.get("messages", [])
+    if not messages:
+        return
+
+    dump = []
+    for message in messages:
+        temp = {}
+        temp.update({"id": message["id"]})
+
+        full_message = (
             service.users()
             .messages()
-            .list(userId="me", labelIds=["INBOX", "UNREAD"], maxResults=max_results)
+            .get(userId="me", id=message["id"])
             .execute()
         )
-        messages = results.get("messages", [])
+        payload = full_message["payload"]
+        headers = payload["headers"]
 
-        if not messages:
-            print("No unread messages found.\n")
-            return
+        if "parts" in payload:
+            for part in payload["parts"]:
+                if part["mimeType"] == "text/plain":
+                    body = base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8")
+                    break
+        else:
+            body = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8")
 
-        print(f"Found {len(messages)} unread messages. Processing...\n")
+        message_folder = os.path.join("attachments", message["id"])
+        os.makedirs(message_folder, exist_ok=True)
+        if "parts" in payload:
+            for part in payload["parts"]:
+                filename = part.get("filename")
+                part_body = part.get("body")
+                if not filename:
+                    continue
+                att_id = part_body.get("attachmentId")
+                if att_id:
+                    attachment = (
+                        service.users()
+                        .messages()
+                        .attachments()
+                        .get(userId="me", messageId=message["id"], id=att_id)
+                        .execute()
+                    )
+                    data = attachment.get("data")
+                else:
+                    data = part_body.get("data")
+                if not data:
+                    continue
+                file_data = base64.urlsafe_b64decode(data)
+                file_path = os.path.join(message_folder, filename)
+                with open(file_path, "wb") as f:
+                    f.write(file_data)
 
-        for message in messages:
-            msg = (
-                service.users()
-                    .messages()
-                    .get(userId="me", id=message["id"])
-                    .execute()
-            )
-            payload = msg["payload"]
-            headers = payload["headers"]
+        temp.update({"BODY": body})
+        for head in headers:
+            if head.get("name") == "Delivered-To":
+                temp.update({"TO": head.get("value")})
+            elif head.get("name") == "From":
+                temp.update({"FROM": head.get("value")})
+            elif head.get("name") == "Subject":
+                temp.update({"SUBJECT": head.get("value")})
 
-            sender = next((h["value"] for h in headers if h["name"] == "From"), "Unknown")
-            subject = next(
-                (h["value"] for h in headers if h["name"] == "Subject"), "(No Subject)"
-            )
+        dump.append(temp)
 
-            if "parts" in payload:
-                body_content, downloaded_files = parse_parts(
-                    service, payload["parts"], message["id"]
-                )
-            else:
-                data = payload["body"].get("data", "")
-                body_content = (
-                    base64.urlsafe_b64decode(data).decode("utf-8") if data else ""
-                )
-                downloaded_files = []
+    existing = []
+    if os.path.exists("messages.json"):
+        with open("messages.json", "r") as m:
+            existing = json.load(m)
 
-            print(f"ID: {message['id']}")
-            print(f"  From: {sender}")
-            print(f"  Subject: {subject}")
-            print(f"  Body Preview: {body_content}")
-            if downloaded_files:
-                print(f"  Attachments saved: {downloaded_files}")
-            print("-" * 40)
+    existing.extend(dump)
+    with open("messages.json", "w") as m:
+        json.dump(existing, m, indent=2)
+
+
+def main():
+    creds = get_credentials()
+
+    try:
+        service = build("gmail", "v1", credentials=creds)
+
+        while True:
+            scrape_emails(service)
+            time.sleep(300)
 
     except HttpError as error:
-        print(f"An error occurred while fetching unread emails: {error}")
-
-
-def main(poll_interval_seconds: int = 300):
-    service = get_gmail_service()
-
-    print(f"Starting unread email fetcher. Polling every {poll_interval_seconds} seconds.")
-    while True:
-        print("Checking for unread emails...\n")
-        fetch_unread_emails(service)
-        print(f"Waiting {poll_interval_seconds} seconds before next check...\n")
-        time.sleep(poll_interval_seconds)
+        print(f"An error occurred: {error}")
 
 
 if __name__ == "__main__":

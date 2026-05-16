@@ -8,3 +8,7 @@ __pycache__/
 
 .vscode/
 
+src/email_access/credentials.json
+src/email_access/token.json
+src/email_access/attachments/*
+src/email_access/messages.json
