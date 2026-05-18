@@ -135,10 +135,8 @@ def main():
 
     try:
         service = build("gmail", "v1", credentials=creds)
+        scrape_emails(service)
 
-        while True:
-            scrape_emails(service)
-            time.sleep(300)
 
     except HttpError as error:
         print(f"An error occurred: {error}")

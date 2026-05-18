@@ -1,56 +1,86 @@
-
+import json
+import os
 from pymongo import MongoClient
-from pymongo.server_api import ServerApi
-from pymongo.errors import DuplicateKeyError
-import datetime
+from dotenv import load_dotenv
 
-url = "mongodb+srv://databse34:Project456@cluster0.pxydvmk.mongodb.net/?appName=Cluster0"
-client = MongoClient(url, server_api=ServerApi('1'))
-db = client["EmailServer"]  
-collection = db["InboundEmails"]
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_FILE = os.path.join(BASE_DIR, "classified_emails.json")
 
-def save_raw_email(message_id, sender, subject, body, received_at):
-    document = {
-        "_id": message_id,  # Use Gmail's message-ID
-        "metadata": {
-            "sender": sender,
-            "subject": subject,
-            "received_at": received_at
-        },
-        "content": {
-            "body": body
-        },
-        "classification": {
-            "category": None,     
-            "processed": False
-        }
-    }
+# ✅ load .env FIRST before anything else
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-    try:
-        collection.insert_one(document)
-        print(f"[+] Stored email: {subject[:30]}...")
-        return True
-    except DuplicateKeyError:
-        print(f"[-] Skipped duplicate email: {message_id}")
+# ✅ verify it's being read
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB = os.getenv("MONGO_DB", "insIIT")
+
+if not MONGO_URI:
+    raise ValueError("MONGO_URI not found in .env")
+
+print(f"Connecting to: {MONGO_URI[:30]}...")  # print first 30 chars to verify
+
+client = MongoClient(MONGO_URI)
+db = client[MONGO_DB]
+
+
+def get_collection(category: str):
+    return db[category]
+
+
+def insert_email(email: dict) -> bool:
+    category = email.get("category")
+    if not category:
+        print(f"No category found — skipping")
         return False
 
-def update_classification(message_id, category, confidence):
-    result = collection.update_one(
-        {"_id": message_id},
-        {
-            "$set": {
-                "classification.category": category,
-                "classification.confidence": confidence,
-                "classification.processed": True,
-                "classification.processed_at": datetime.datetime.now()
-            }
-        }
-    )
-    
-    if result.modified_count > 0:
-        print(f"Classified {message_id} as {category}")
-    else:
-        print(f"Error: Could not find message {message_id}")
+    collection = get_collection(category)
 
-def get_unprocessed_emails():
-    return list(collection.find({"classification.processed": False}))
+    existing = collection.find_one({"message_id": email.get("message_id")})
+    if existing:
+        print(f"Duplicate skipped: {email.get('title')}")
+        return False
+
+    collection.insert_one(email)
+    print(f"Inserted [{category}]: {email.get('title')}")
+    return True
+
+
+def get_all(category: str) -> list:
+    return list(get_collection(category).find({}, {"_id": 0}))
+
+
+def get_by_from(category: str, from_email: str) -> list:
+    return list(get_collection(category).find({"from_email": from_email}, {"_id": 0}))
+
+
+def delete_by_message_id(category: str, message_id: str) -> bool:
+    result = get_collection(category).delete_one({"message_id": message_id})
+    return result.deleted_count > 0
+
+
+def run_database():
+    if not os.path.exists(INPUT_FILE):
+        print("classified_emails.json not found.")
+        return
+
+    with open(INPUT_FILE, "r") as f:
+        emails = json.load(f)
+
+    if not emails:
+        print("No emails to insert.")
+        return
+
+    inserted = 0
+    skipped = 0
+
+    for email in emails:
+        success = insert_email(email)
+        if success:
+            inserted += 1
+        else:
+            skipped += 1
+
+    print(f"\n✅ Inserted: {inserted} | ⏭️ Skipped: {skipped}")
+
+
+if __name__ == "__main__":
+    run_database()
