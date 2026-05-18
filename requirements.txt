@@ -8,3 +8,4 @@ beautifulsoup4
 google-genai 
 python-dotenv
 pydantic
+pymongo
