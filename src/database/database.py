@@ -20,7 +20,7 @@ def insert_lost_found(email: dict) -> int:
     for item in items:
         existing = collection.find_one({
             "message_id": item.get("message_id"),
-            "item": item.get("item")
+            "description": item.get("description")
         })
         if existing:
             continue
