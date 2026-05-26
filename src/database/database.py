@@ -8,46 +8,76 @@ INPUT_FILE = os.path.join(BASE_DIR, "classified_emails.json")
 
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB", "insIIT")
-
-if not MONGO_URI:
-    raise ValueError("MONGO_URI not found in .env")
-
-client = MongoClient(MONGO_URI)
-db = client[MONGO_DB]
+client = MongoClient(os.getenv("MONGO_URI"))
+db = client[os.getenv("MONGO_DB", "insIIT")]
 
 
-def get_collection(category: str):
-    return db[category]
+def insert_lost_found(email: dict) -> int:
+    collection = db["lost&found"]
+    items = email.get("items", [])
+    inserted = 0
+
+    for item in items:
+        existing = collection.find_one({
+            "message_id": item.get("message_id"),
+            "item": item.get("item")
+        })
+        if existing:
+            continue
+        collection.insert_one(item)
+        inserted += 1
+
+    return inserted
 
 
-def insert_email(email: dict) -> bool:
+def insert_medical(email: dict) -> int:
+    inserted = 0
+
+    unavail_col = db["medical_unavailability"]
+    for entry in email.get("unavailability", []):
+        entry["message_id"] = email.get("message_id")
+        entry["from_email"] = email.get("from_email")
+        existing = unavail_col.find_one({
+            "message_id": email.get("message_id"),
+            "doctor_name": entry.get("doctor_name"),
+            "unavailable_date": entry.get("unavailable_date"),
+            "unavailable_start_time": entry.get("unavailable_start_time")
+        })
+        if existing:
+            continue
+        unavail_col.insert_one(entry)
+        inserted += 1
+
+    timings_col = db["medical_timings"]
+    for entry in email.get("updated_timings", []):
+        entry["message_id"] = email.get("message_id")
+        entry["from_email"] = email.get("from_email")
+        existing = timings_col.find_one({
+            "message_id": email.get("message_id"),
+            "doctor_name": entry.get("doctor_name"),
+            "date": entry.get("date"),
+            "updated_start_time": entry.get("updated_start_time")
+        })
+        if existing:
+            continue
+        timings_col.insert_one(entry)
+        inserted += 1
+
+    return inserted
+
+
+def insert_default(email: dict) -> int:
     category = email.get("category")
     if not category:
-        return False
+        return 0
 
-    collection = get_collection(category)
-
+    collection = db[category]
     existing = collection.find_one({"message_id": email.get("message_id")})
     if existing:
-        return False
+        return 0
 
     collection.insert_one(email)
-    return True
-
-
-def get_all(category: str) -> list:
-    return list(get_collection(category).find({}, {"_id": 0}))
-
-
-def get_by_from(category: str, from_email: str) -> list:
-    return list(get_collection(category).find({"from_email": from_email}, {"_id": 0}))
-
-
-def delete_by_message_id(category: str, message_id: str) -> bool:
-    result = get_collection(category).delete_one({"message_id": message_id})
-    return result.deleted_count > 0
+    return 1
 
 
 def run_database():
@@ -60,9 +90,15 @@ def run_database():
     if not emails:
         return
 
+    inserted = 0
     for email in emails:
-        insert_email(email)
-
+        category = email.get("category")
+        if category == "lost&found":
+            inserted += insert_lost_found(email)
+        elif category == "medical":
+            inserted += insert_medical(email)
+        else:
+            inserted += insert_default(email)
 
 if __name__ == "__main__":
     run_database()
