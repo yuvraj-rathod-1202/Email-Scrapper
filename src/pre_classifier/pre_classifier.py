@@ -53,15 +53,15 @@ def run_pre_classifier():
     all_categories = set(SENDER_CATEGORIES.values()) | set(SUBJECT_CATEGORIES.keys())
     categorized = {category: [] for category in all_categories}
 
-    dropped = 0
     for email in emails:
         category = get_category_from_sender(email.get("FROM", ""))
 
         if category is None:
-            category = get_category_from_subject(email.get("SUBJECT", ""))
+            sender_email = extract_email(email.get("FROM", ""))
+            if sender_email.endswith("@iitgn.ac.in"):
+                category = get_category_from_subject(email.get("SUBJECT", ""))
 
         if category is None:
-            dropped += 1
             continue
 
         categorized[category].append(email)

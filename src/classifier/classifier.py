@@ -1,10 +1,10 @@
 import json
 import os
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR,".env"))
@@ -26,7 +26,7 @@ class LostItem(BaseModel):
 
 class LostFoundSchema(BaseModel):
     category: Optional[str]
-    items: list[LostItem]
+    items: List[LostItem] = Field(default_factory=list) 
 
 
 class MedicalUnavailability(BaseModel):
@@ -45,8 +45,8 @@ class MedicalSchema(BaseModel):
     category: Optional[str]
     message_id: Optional[str]
     from_email: Optional[str]
-    unavailability: list[MedicalUnavailability]
-    updated_timings: list[MedicalUpdatedTiming]
+    unavailability: List[MedicalUnavailability] = Field(default_factory=list)
+    updated_timings: List[MedicalUpdatedTiming] = Field(default_factory=list)
 
 
 class DefaultSchema(BaseModel):

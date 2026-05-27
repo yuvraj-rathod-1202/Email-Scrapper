@@ -13,7 +13,8 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 TOKEN_FILE = os.path.join(BASE_DIR, "token.json")
-
+MESSAGES_FILE = os.path.join(BASE_DIR, "messages.json") 
+ATTACHMENTS_DIR = os.path.join(BASE_DIR, "attachments") 
 
 def get_credentials():
     creds = None
@@ -51,8 +52,8 @@ def scrape_emails(service):
 
     existing = []
     saved_ids = set()
-    if os.path.exists("messages.json"):
-        with open("messages.json", "r") as m:
+    if os.path.exists(MESSAGES_FILE):
+        with open(MESSAGES_FILE, "r") as m:
             existing = json.load(m)
         saved_ids = {email["id"] for email in existing}
 
@@ -82,16 +83,23 @@ def scrape_emails(service):
                     if data:
                         body = base64.urlsafe_b64decode(data).decode("utf-8")
                         break
+            if not body:
+                for part in payload["parts"]:
+                    if part["mimeType"] == "text/html":
+                        data = part["body"].get("data")
+                        if data:
+                            body = base64.urlsafe_b64decode(data).decode("utf-8")
+                            break
         else:
             data = payload["body"].get("data")
             body = base64.urlsafe_b64decode(data).decode("utf-8") if data else ""
 
-        message_folder = os.path.join("attachments", message["id"])
+        message_folder = os.path.join(ATTACHMENTS_DIR, message["id"])
         os.makedirs(message_folder, exist_ok=True)
         if "parts" in payload:
             for part in payload["parts"]:
                 filename = part.get("filename")
-                part_body = part.get("body")
+                part_body = part.get("body", {})
                 if not filename:
                     continue
                 att_id = part_body.get("attachmentId")
@@ -126,7 +134,7 @@ def scrape_emails(service):
 
     if dump:
         existing.extend(dump)
-        with open("messages.json", "w") as m:
+        with open(MESSAGES_FILE, "w") as m: 
             json.dump(existing, m, indent=2)
 
 
