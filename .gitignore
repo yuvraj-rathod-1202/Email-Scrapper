@@ -8,3 +8,20 @@ __pycache__/
 
 .vscode/
 
+src/email_access/credentials.json
+src/email_access/token.json
+src/email_access/attachments/*
+src/email_access/messages.json
+
+src/pre_classifier/messages.json
+src/pre_classifier/pre_classified.json
+
+src/parser/parsed_emails.json
+src/parser/pre_classified.json
+
+src/classifier/.env
+src/classifier/parsed_emails.json
+src/classifier/classified_emails.json
+
+src/database/.env
+src/database/classified_emails.json

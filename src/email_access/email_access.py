@@ -1,7 +1,7 @@
 import os.path
+import json
 import base64
 import time
-
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -10,146 +10,144 @@ from googleapiclient.errors import HttpError
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
+TOKEN_FILE = os.path.join(BASE_DIR, "token.json")
+MESSAGES_FILE = os.path.join(BASE_DIR, "messages.json") 
+ATTACHMENTS_DIR = os.path.join(BASE_DIR, "attachments") 
 
-def download_attachment(service, message_id, attachment_id, filename):
-    try:
-        att = (
-            service.users()
-            .messages()
-            .attachments()
-            .get(userId="me", messageId=message_id, id=attachment_id)
-            .execute()
-        )
-
-        file_data = base64.urlsafe_b64decode(att["data"])
-
-        if not os.path.exists("downloads"):
-            os.makedirs("downloads")
-
-        path = os.path.join("downloads", filename)
-        with open(path, "wb") as f:
-            f.write(file_data)
-
-        return path
-    except Exception:
-        return None
-
-
-def parse_parts(service, parts, message_id):
-    body_text = ""
-    attachments_list = []
-
-    if not parts:
-        return body_text, attachments_list
-
-    for part in parts:
-        mimeType = part.get("mimeType")
-        filename = part.get("filename")
-        body = part.get("body", {})
-        attachment_id = body.get("attachmentId")
-
-        if mimeType == "text/plain" and "data" in body:
-            data = body["data"]
-            byte_code = base64.urlsafe_b64decode(data)
-            body_text += byte_code.decode("utf-8")
-
-        elif mimeType in ["multipart/alternative", "multipart/mixed"]:
-            if "parts" in part:
-                sub_body, sub_attachments = parse_parts(
-                    service, part["parts"], message_id
-                )
-                body_text += sub_body
-                attachments_list.extend(sub_attachments)
-
-        if filename and attachment_id:
-            saved_path = download_attachment(service, message_id, attachment_id, filename)
-            if saved_path:
-                attachments_list.append(saved_path)
-
-    return body_text, attachments_list
-
-
-def get_gmail_service():
+def get_credentials():
     creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json", SCOPES
-            )
-            creds = flow.run_local_server(port=8080)
-        with open("token.json", "w") as token:
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            creds = flow.run_local_server(port=8000)
+
+        with open(TOKEN_FILE, "w") as token:
             token.write(creds.to_json())
 
-    return build("gmail", "v1", credentials=creds)
+    return creds
 
 
-def fetch_unread_emails(service, max_results: int = 50):
-    try:
-        results = (
+def scrape_emails(service):
+    results = (
+        service.users()
+        .messages()
+        .list(
+            userId="me",
+            labelIds=["INBOX", "UNREAD"],
+            maxResults=10
+        )
+        .execute()
+    )
+    messages = results.get("messages", [])
+    if not messages:
+        return
+
+    existing = []
+    saved_ids = set()
+    if os.path.exists(MESSAGES_FILE):
+        with open(MESSAGES_FILE, "r") as m:
+            existing = json.load(m)
+        saved_ids = {email["id"] for email in existing}
+
+    dump = []
+    for message in messages:
+
+        if message["id"] in saved_ids:
+            continue
+
+        temp = {}
+        temp.update({"id": message["id"]})
+
+        full_message = (
             service.users()
             .messages()
-            .list(userId="me", labelIds=["INBOX", "UNREAD"], maxResults=max_results)
+            .get(userId="me", id=message["id"])
             .execute()
         )
-        messages = results.get("messages", [])
+        payload = full_message["payload"]
+        headers = payload["headers"]
 
-        if not messages:
-            print("No unread messages found.\n")
-            return
+        if "parts" in payload:
+            body = ""
+            for part in payload["parts"]:
+                if part["mimeType"] == "text/plain":
+                    data = part["body"].get("data")
+                    if data:
+                        body = base64.urlsafe_b64decode(data).decode("utf-8")
+                        break
+            if not body:
+                for part in payload["parts"]:
+                    if part["mimeType"] == "text/html":
+                        data = part["body"].get("data")
+                        if data:
+                            body = base64.urlsafe_b64decode(data).decode("utf-8")
+                            break
+        else:
+            data = payload["body"].get("data")
+            body = base64.urlsafe_b64decode(data).decode("utf-8") if data else ""
 
-        print(f"Found {len(messages)} unread messages. Processing...\n")
+        message_folder = os.path.join(ATTACHMENTS_DIR, message["id"])
+        os.makedirs(message_folder, exist_ok=True)
+        if "parts" in payload:
+            for part in payload["parts"]:
+                filename = part.get("filename")
+                part_body = part.get("body", {})
+                if not filename:
+                    continue
+                att_id = part_body.get("attachmentId")
+                if att_id:
+                    attachment = (
+                        service.users()
+                        .messages()
+                        .attachments()
+                        .get(userId="me", messageId=message["id"], id=att_id)
+                        .execute()
+                    )
+                    data = attachment.get("data")
+                else:
+                    data = part_body.get("data")
+                if not data:
+                    continue
+                file_data = base64.urlsafe_b64decode(data)
+                file_path = os.path.join(message_folder, filename)
+                with open(file_path, "wb") as f:
+                    f.write(file_data)
 
-        for message in messages:
-            msg = (
-                service.users()
-                    .messages()
-                    .get(userId="me", id=message["id"])
-                    .execute()
-            )
-            payload = msg["payload"]
-            headers = payload["headers"]
+        temp.update({"BODY": body})
+        for head in headers:
+            if head.get("name") == "Delivered-To":
+                temp.update({"TO": head.get("value")})
+            elif head.get("name") == "From":
+                temp.update({"FROM": head.get("value")})
+            elif head.get("name") == "Subject":
+                temp.update({"SUBJECT": head.get("value")})
 
-            sender = next((h["value"] for h in headers if h["name"] == "From"), "Unknown")
-            subject = next(
-                (h["value"] for h in headers if h["name"] == "Subject"), "(No Subject)"
-            )
+        dump.append(temp)
 
-            if "parts" in payload:
-                body_content, downloaded_files = parse_parts(
-                    service, payload["parts"], message["id"]
-                )
-            else:
-                data = payload["body"].get("data", "")
-                body_content = (
-                    base64.urlsafe_b64decode(data).decode("utf-8") if data else ""
-                )
-                downloaded_files = []
+    if dump:
+        existing.extend(dump)
+        with open(MESSAGES_FILE, "w") as m: 
+            json.dump(existing, m, indent=2)
 
-            print(f"ID: {message['id']}")
-            print(f"  From: {sender}")
-            print(f"  Subject: {subject}")
-            print(f"  Body Preview: {body_content}")
-            if downloaded_files:
-                print(f"  Attachments saved: {downloaded_files}")
-            print("-" * 40)
+
+def main():
+    creds = get_credentials()
+
+    try:
+        service = build("gmail", "v1", credentials=creds)
+        scrape_emails(service)
+
 
     except HttpError as error:
-        print(f"An error occurred while fetching unread emails: {error}")
-
-
-def main(poll_interval_seconds: int = 300):
-    service = get_gmail_service()
-
-    print(f"Starting unread email fetcher. Polling every {poll_interval_seconds} seconds.")
-    while True:
-        print("Checking for unread emails...\n")
-        fetch_unread_emails(service)
-        print(f"Waiting {poll_interval_seconds} seconds before next check...\n")
-        time.sleep(poll_interval_seconds)
+        print(f"An error occurred: {error}")
 
 
 if __name__ == "__main__":

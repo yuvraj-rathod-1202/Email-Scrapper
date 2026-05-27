@@ -1,56 +1,104 @@
-
+import json
+import os
 from pymongo import MongoClient
-from pymongo.server_api import ServerApi
-from pymongo.errors import DuplicateKeyError
-import datetime
+from dotenv import load_dotenv
 
-url = "mongodb+srv://databse34:Project456@cluster0.pxydvmk.mongodb.net/?appName=Cluster0"
-client = MongoClient(url, server_api=ServerApi('1'))
-db = client["EmailServer"]  
-collection = db["InboundEmails"]
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_FILE = os.path.join(BASE_DIR, "classified_emails.json")
 
-def save_raw_email(message_id, sender, subject, body, received_at):
-    document = {
-        "_id": message_id,  # Use Gmail's message-ID
-        "metadata": {
-            "sender": sender,
-            "subject": subject,
-            "received_at": received_at
-        },
-        "content": {
-            "body": body
-        },
-        "classification": {
-            "category": None,     
-            "processed": False
-        }
-    }
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-    try:
-        collection.insert_one(document)
-        print(f"[+] Stored email: {subject[:30]}...")
-        return True
-    except DuplicateKeyError:
-        print(f"[-] Skipped duplicate email: {message_id}")
-        return False
+client = MongoClient(os.getenv("MONGO_URI"))
+db = client[os.getenv("MONGO_DB", "insIIT")]
 
-def update_classification(message_id, category, confidence):
-    result = collection.update_one(
-        {"_id": message_id},
-        {
-            "$set": {
-                "classification.category": category,
-                "classification.confidence": confidence,
-                "classification.processed": True,
-                "classification.processed_at": datetime.datetime.now()
-            }
-        }
-    )
-    
-    if result.modified_count > 0:
-        print(f"Classified {message_id} as {category}")
-    else:
-        print(f"Error: Could not find message {message_id}")
 
-def get_unprocessed_emails():
-    return list(collection.find({"classification.processed": False}))
+def insert_lost_found(email: dict) -> int:
+    collection = db["lost&found"]
+    items = email.get("items", [])
+    inserted = 0
+
+    for item in items:
+        existing = collection.find_one({
+            "message_id": item.get("message_id"),
+            "description": item.get("description")
+        })
+        if existing:
+            continue
+        collection.insert_one(item)
+        inserted += 1
+
+    return inserted
+
+
+def insert_medical(email: dict) -> int:
+    inserted = 0
+
+    unavail_col = db["medical_unavailability"]
+    for entry in email.get("unavailability", []):
+        entry["message_id"] = email.get("message_id")
+        entry["from_email"] = email.get("from_email")
+        existing = unavail_col.find_one({
+            "message_id": email.get("message_id"),
+            "doctor_name": entry.get("doctor_name"),
+            "unavailable_date": entry.get("unavailable_date"),
+            "unavailable_start_time": entry.get("unavailable_start_time")
+        })
+        if existing:
+            continue
+        unavail_col.insert_one(entry)
+        inserted += 1
+
+    timings_col = db["medical_timings"]
+    for entry in email.get("updated_timings", []):
+        entry["message_id"] = email.get("message_id")
+        entry["from_email"] = email.get("from_email")
+        existing = timings_col.find_one({
+            "message_id": email.get("message_id"),
+            "doctor_name": entry.get("doctor_name"),
+            "date": entry.get("date"),
+            "updated_start_time": entry.get("updated_start_time")
+        })
+        if existing:
+            continue
+        timings_col.insert_one(entry)
+        inserted += 1
+
+    return inserted
+
+
+def insert_default(email: dict) -> int:
+    category = email.get("category")
+    if not category:
+        return 0
+
+    collection = db[category]
+    existing = collection.find_one({"message_id": email.get("message_id")})
+    if existing:
+        return 0
+
+    collection.insert_one(email)
+    return 1
+
+
+def run_database():
+    if not os.path.exists(INPUT_FILE):
+        return
+
+    with open(INPUT_FILE, "r") as f:
+        emails = json.load(f)
+
+    if not emails:
+        return
+
+    inserted = 0
+    for email in emails:
+        category = email.get("category")
+        if category == "lost&found":
+            inserted += insert_lost_found(email)
+        elif category == "medical":
+            inserted += insert_medical(email)
+        else:
+            inserted += insert_default(email)
+
+if __name__ == "__main__":
+    run_database()
